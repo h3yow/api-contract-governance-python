@@ -32,3 +32,27 @@ def limited_svc() -> GovernanceService:
             expose_error_details=False,
         )
     )
+
+
+class FakeClock:
+    """协作式假时钟：可显式推进，供时间预算测试确定地触发超时。"""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+@pytest.fixture()
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture()
+def clocked_svc(clock: FakeClock) -> GovernanceService:
+    # 预算 1.0 秒，时钟由用例通过 clock 推进控制，不依赖真实调度时序。
+    return GovernanceService(GovernanceLimits(validation_timeout=1.0), clock=clock)

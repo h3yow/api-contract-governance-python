@@ -16,6 +16,10 @@ class Reason(enum.Enum):
     INVALID_CONTRACT = "invalid_contract"
     LIMIT_EXCEEDED = "limit_exceeded"
     VALIDATION_FAILED = "validation_failed"
+    VALIDATION_SIDE_MISMATCH = "validation_side_mismatch"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    BREAKING_CHANGE_REJECTED = "breaking_change_rejected"
+    DECISION_NOT_FOUND = "decision_not_found"
 
 
 class GovernanceError(Exception):

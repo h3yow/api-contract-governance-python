@@ -14,7 +14,7 @@ import threading
 
 from .config import GovernanceLimits
 from .errors import GovernanceError, Reason
-from .models import Contract, ContractSpec, ContractStatus
+from .models import Contract, ContractSpec, ContractStatus, PublishDecision, Verdict
 
 
 class ContractRegistry:
@@ -25,18 +25,34 @@ class ContractRegistry:
         self._lock = threading.RLock()
         # contract_id -> {version -> Contract}；当前版本为最大键。
         self._contracts: dict[str, dict[int, Contract]] = {}
+        # contract_id -> {to_version -> PublishDecision}；门禁记录永久可查。
+        self._decisions: dict[str, dict[int, PublishDecision]] = {}
 
     def _check_spec(self, spec: ContractSpec) -> None:
         if not isinstance(spec, ContractSpec):
             raise GovernanceError(Reason.INVALID_CONTRACT, "spec must be a ContractSpec")
-        if len(spec.fields) > self._limits.max_fields_per_contract:
-            raise GovernanceError(
-                Reason.LIMIT_EXCEEDED,
-                f"contract exceeds max fields per contract ({self._limits.max_fields_per_contract})",
-            )
-        names = [f.name for f in spec.fields]
-        if len(names) != len(set(names)):
-            raise GovernanceError(Reason.INVALID_CONTRACT, "duplicate field names in spec")
+
+        def _check_fields(fields: tuple, label: str) -> None:
+            if len(fields) > self._limits.max_fields_per_contract:
+                raise GovernanceError(
+                    Reason.LIMIT_EXCEEDED,
+                    f"contract exceeds max fields per {label} "
+                    f"({self._limits.max_fields_per_contract})",
+                )
+            names = [f.name for f in fields]
+            if len(names) != len(set(names)):
+                raise GovernanceError(
+                    Reason.INVALID_CONTRACT, f"duplicate field names in {label} spec"
+                )
+
+        _check_fields(spec.fields, "contract")
+        _check_fields(spec.request_fields, "request")
+        _check_fields(spec.response_fields, "response")
+
+    def validate_spec(self, spec: ContractSpec) -> None:
+        """在锁外预检规格合法性（门禁在做兼容性判定前先挡住非法规格）。"""
+        with self._lock:
+            self._check_spec(spec)
 
     def _history(self, contract_id: str) -> dict[int, Contract]:
         history = self._contracts.get(contract_id)
@@ -127,3 +143,59 @@ class ContractRegistry:
             )
             history[current.version] = revoked
             return revoked
+
+    def commit_version(
+        self,
+        contract_id: str,
+        version: int,
+        spec: ContractSpec,
+        verdict: Verdict,
+        changes: tuple,
+        breaking_accepted: bool,
+    ) -> Contract:
+        """发布门禁通过后的原子提交：线性流转校验、版本落库、门禁记录落库在同一把锁内。
+
+        跳号 / 回退 / 重复（含并发提交的落败方）一律报
+        ILLEGAL_VERSION_TRANSITION，与门禁的 BREAKING_CHANGE_REJECTED 明确区分。
+        任何失败都发生在写入之前，不残留状态。
+        """
+        with self._lock:
+            history = self._history(contract_id)
+            current = self._current(history)
+            if current.status is ContractStatus.REVOKED:
+                raise GovernanceError(Reason.CONTRACT_REVOKED, f"contract '{contract_id}' is revoked")
+            if version != current.version + 1 or version in history:
+                raise GovernanceError(
+                    Reason.ILLEGAL_VERSION_TRANSITION,
+                    f"illegal version transition: {current.version} -> {version}",
+                )
+            self._check_spec(spec)
+            updated = Contract(
+                contract_id=contract_id,
+                version=version,
+                spec=spec,
+                status=ContractStatus.ACTIVE,
+            )
+            history[version] = updated
+            decision = PublishDecision(
+                contract_id=contract_id,
+                version=version,
+                verdict=verdict,
+                changes=tuple(changes),
+                breaking_accepted=breaking_accepted,
+            )
+            self._decisions.setdefault(contract_id, {})[version] = decision
+            return updated
+
+    def get_publish_decision(self, contract_id: str, version: int) -> PublishDecision:
+        """查询某次已落库发布的门禁判定依据与确认结果。"""
+        with self._lock:
+            self._history(contract_id)  # 不存在 -> CONTRACT_NOT_FOUND
+            decisions = self._decisions.get(contract_id, {})
+            decision = decisions.get(version)
+            if decision is None:
+                raise GovernanceError(
+                    Reason.DECISION_NOT_FOUND,
+                    f"contract '{contract_id}' has no publish decision for version {version}",
+                )
+            return decision

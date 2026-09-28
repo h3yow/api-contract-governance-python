@@ -11,11 +11,16 @@ from .models import (
     ContractStatus,
     FieldSpec,
     FieldType,
+    PairedValidationResult,
+    PublishDecision,
+    Side,
+    SideValidationResult,
     ValidationIssue,
     ValidationResult,
     Verdict,
 )
 from .service import GovernanceService
+from .validation import MISSING
 
 __all__ = [
     "Change",
@@ -29,7 +34,12 @@ __all__ = [
     "GovernanceError",
     "GovernanceLimits",
     "GovernanceService",
+    "MISSING",
+    "PairedValidationResult",
+    "PublishDecision",
     "Reason",
+    "Side",
+    "SideValidationResult",
     "ValidationIssue",
     "ValidationResult",
     "Verdict",

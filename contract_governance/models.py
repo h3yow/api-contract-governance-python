@@ -43,6 +43,13 @@ class Verdict(enum.Enum):
     BREAKING = "breaking"
 
 
+class Side(enum.Enum):
+    """成对校验中可区分的两侧。"""
+
+    REQUEST = "request"
+    RESPONSE = "response"
+
+
 @dataclass(frozen=True)
 class FieldSpec:
     """单个字段的契约定义。"""
@@ -54,9 +61,26 @@ class FieldSpec:
 
 @dataclass(frozen=True)
 class ContractSpec:
-    """某一版本契约的完整定义（不可变，保证并发读取安全）。"""
+    """某一版本契约的完整定义（不可变，保证并发读取安全）。
+
+    两种写法：
+    - 单侧老契约：只声明 fields，按原有方式校验。
+    - 成对新契约：声明 request_fields / response_fields（可只声明一侧），
+      通过成对校验入口提交两侧内容。
+    """
 
     fields: tuple[FieldSpec, ...] = ()
+    request_fields: tuple[FieldSpec, ...] = ()
+    response_fields: tuple[FieldSpec, ...] = ()
+
+    def sides(self) -> dict[Side, tuple[FieldSpec, ...]]:
+        """返回声明过的侧 -> 字段形状，未声明的侧不出现在结果中。"""
+        declared: dict[Side, tuple[FieldSpec, ...]] = {}
+        if self.request_fields:
+            declared[Side.REQUEST] = self.request_fields
+        if self.response_fields:
+            declared[Side.RESPONSE] = self.response_fields
+        return declared
 
 
 @dataclass(frozen=True)
@@ -71,11 +95,15 @@ class Contract:
 
 @dataclass(frozen=True)
 class Change:
-    """一次版本间变更的归一化描述。"""
+    """一次版本间变更的归一化描述。
+
+    side 为 None 表示来自单侧老契约的形状；成对契约按请求/响应侧归属。
+    """
 
     kind: ChangeKind
     field_name: str
     detail: str
+    side: Side | None = None
 
 
 @dataclass(frozen=True)
@@ -106,3 +134,33 @@ class ValidationResult:
     contract_id: str
     version: int
     issues: tuple[ValidationIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class SideValidationResult:
+    """成对校验中单侧的结果：问题归属明确，两侧结果互不覆盖。"""
+
+    side: Side
+    ok: bool
+    issues: tuple[ValidationIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class PairedValidationResult:
+    """成对校验的归一化结果：按侧区分问题，任一侧不过则整体不过。"""
+
+    ok: bool
+    contract_id: str
+    version: int
+    sides: tuple[SideValidationResult, ...] = ()
+
+
+@dataclass(frozen=True)
+class PublishDecision:
+    """一次版本发布门禁的判定与确认记录，落库后可重新查到。"""
+
+    contract_id: str
+    version: int
+    verdict: Verdict
+    changes: tuple[Change, ...] = ()
+    breaking_accepted: bool = False
