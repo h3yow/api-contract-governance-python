@@ -43,6 +43,13 @@ class Verdict(enum.Enum):
     BREAKING = "breaking"
 
 
+class Side(enum.Enum):
+    """成对校验中的数据侧别。"""
+
+    REQUEST = "request"
+    RESPONSE = "response"
+
+
 @dataclass(frozen=True)
 class FieldSpec:
     """单个字段的契约定义。"""
@@ -54,9 +61,24 @@ class FieldSpec:
 
 @dataclass(frozen=True)
 class ContractSpec:
-    """某一版本契约的完整定义（不可变，保证并发读取安全）。"""
+    """某一版本契约的完整定义（不可变，保证并发读取安全）。
+
+    - 仅声明 fields 时为老的单侧（请求形状）契约，沿用原有校验方式。
+    - 额外声明 response_fields 时为成对契约：请求侧与响应侧形状分开描述。
+      response_fields=() 表示成对但响应侧无字段约束，与 None（老契约）区分。
+    """
 
     fields: tuple[FieldSpec, ...] = ()
+    response_fields: tuple[FieldSpec, ...] | None = None
+
+    @property
+    def is_paired(self) -> bool:
+        """是否成对声明了请求侧与响应侧。"""
+        return self.response_fields is not None
+
+    def fields_of(self, side: "Side") -> tuple[FieldSpec, ...]:
+        """取指定侧的字段形状。"""
+        return self.fields if side is Side.REQUEST else (self.response_fields or ())
 
 
 @dataclass(frozen=True)
@@ -106,3 +128,40 @@ class ValidationResult:
     contract_id: str
     version: int
     issues: tuple[ValidationIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class SideValidationResult:
+    """成对校验中单侧的校验结论。"""
+
+    side: Side
+    ok: bool
+    issues: tuple[ValidationIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class PairValidationResult:
+    """成对校验的合并结论：两侧问题分别归属，任一侧不过则整体不过。"""
+
+    ok: bool
+    contract_id: str
+    version: int
+    request: SideValidationResult
+    response: SideValidationResult
+
+    def side(self, side: Side) -> SideValidationResult:
+        """按侧别取单侧结论。"""
+        return self.request if side is Side.REQUEST else self.response
+
+
+@dataclass(frozen=True)
+class ReleaseDecision:
+    """一次版本发布门禁的判定依据与确认结果，落库后可重新查到。"""
+
+    contract_id: str
+    from_version: int
+    to_version: int
+    verdict: Verdict
+    changes: tuple[Change, ...]
+    accepted_breaking: bool
+    allowed: bool

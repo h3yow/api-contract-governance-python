@@ -29,14 +29,20 @@ class ContractRegistry:
     def _check_spec(self, spec: ContractSpec) -> None:
         if not isinstance(spec, ContractSpec):
             raise GovernanceError(Reason.INVALID_CONTRACT, "spec must be a ContractSpec")
-        if len(spec.fields) > self._limits.max_fields_per_contract:
+        all_fields: tuple = spec.fields + (spec.response_fields or ())
+        if len(all_fields) > self._limits.max_fields_per_contract:
             raise GovernanceError(
                 Reason.LIMIT_EXCEEDED,
                 f"contract exceeds max fields per contract ({self._limits.max_fields_per_contract})",
             )
-        names = [f.name for f in spec.fields]
+        names = [f.name for f in all_fields]
         if len(names) != len(set(names)):
             raise GovernanceError(Reason.INVALID_CONTRACT, "duplicate field names in spec")
+
+    def validate_spec(self, spec: ContractSpec) -> None:
+        """落库前校验规格（含成对契约两侧字段），不产生任何状态变更。"""
+        with self._lock:
+            self._check_spec(spec)
 
     def _history(self, contract_id: str) -> dict[int, Contract]:
         history = self._contracts.get(contract_id)

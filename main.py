@@ -34,6 +34,9 @@ _STATUS_BY_REASON = {
     Reason.INVALID_CONTRACT: 422,
     Reason.LIMIT_EXCEEDED: 413,
     Reason.VALIDATION_FAILED: 422,
+    Reason.VALIDATION_TIMEOUT: 408,
+    Reason.BREAKING_CHANGE_REJECTED: 409,
+    Reason.RELEASE_RECORD_NOT_FOUND: 404,
 }
 
 
@@ -55,34 +58,68 @@ class FieldIn(BaseModel):
 class RegisterIn(BaseModel):
     contract_id: str = Field(min_length=1)
     fields: list[FieldIn] = []
+    # 缺省/None 表示老的单侧契约；传 [] 表示成对但响应侧无字段约束。
+    response_fields: list[FieldIn] | None = None
 
 
 class UpdateIn(BaseModel):
     version: int = Field(ge=2)
     fields: list[FieldIn] = []
+    response_fields: list[FieldIn] | None = None
+
+
+class PublishIn(BaseModel):
+    version: int = Field(ge=2)
+    fields: list[FieldIn] = []
+    response_fields: list[FieldIn] | None = None
+    accept_breaking: bool = False
 
 
 class ValidateIn(BaseModel):
     version: int = Field(ge=1)
     payload: Any
+    timeout_seconds: float | None = None
 
 
-def _to_spec(fields: list[FieldIn]) -> ContractSpec:
+class ValidatePairIn(BaseModel):
+    version: int = Field(ge=1)
+    request_payload: Any
+    response_payload: Any
+    timeout_seconds: float | None = None
+
+
+def _to_spec(fields: list[FieldIn], response_fields: list[FieldIn] | None = None) -> ContractSpec:
     return ContractSpec(
-        fields=tuple(FieldSpec(name=f.name, type=f.type, required=f.required) for f in fields)
+        fields=tuple(FieldSpec(name=f.name, type=f.type, required=f.required) for f in fields),
+        response_fields=(
+            None
+            if response_fields is None
+            else tuple(
+                FieldSpec(name=f.name, type=f.type, required=f.required)
+                for f in response_fields
+            )
+        ),
     )
 
 
+def _fields_out(fields: Any) -> list[dict[str, Any]]:
+    return [
+        {"name": f.name, "type": f.type.value, "required": f.required}
+        for f in fields
+    ]
+
+
 def _contract_out(c: Any) -> dict[str, Any]:
-    return {
+    out = {
         "contract_id": c.contract_id,
         "version": c.version,
         "status": c.status.value,
-        "fields": [
-            {"name": f.name, "type": f.type.value, "required": f.required}
-            for f in c.spec.fields
-        ],
+        "paired": c.spec.is_paired,
+        "fields": _fields_out(c.spec.fields),
     }
+    if c.spec.is_paired:
+        out["response_fields"] = _fields_out(c.spec.response_fields)
+    return out
 
 
 @app.get("/")
@@ -92,7 +129,9 @@ def read_root() -> dict[str, str]:
 
 @app.post("/contracts", status_code=201)
 def register(body: RegisterIn) -> dict[str, Any]:
-    return _contract_out(service.register(body.contract_id, _to_spec(body.fields)))
+    return _contract_out(
+        service.register(body.contract_id, _to_spec(body.fields, body.response_fields))
+    )
 
 
 @app.get("/contracts/{contract_id}")
@@ -102,7 +141,27 @@ def get_contract(contract_id: str) -> dict[str, Any]:
 
 @app.put("/contracts/{contract_id}")
 def update_contract(contract_id: str, body: UpdateIn) -> dict[str, Any]:
-    return _contract_out(service.update(contract_id, body.version, _to_spec(body.fields)))
+    return _contract_out(
+        service.update(
+            contract_id, body.version, _to_spec(body.fields, body.response_fields)
+        )
+    )
+
+
+@app.post("/contracts/{contract_id}/releases", status_code=201)
+def publish_release(contract_id: str, body: PublishIn) -> dict[str, Any]:
+    decision = service.publish(
+        contract_id,
+        body.version,
+        _to_spec(body.fields, body.response_fields),
+        accept_breaking=body.accept_breaking,
+    )
+    return _decision_out(decision)
+
+
+@app.get("/contracts/{contract_id}/releases/{version}")
+def get_release(contract_id: str, version: int) -> dict[str, Any]:
+    return _decision_out(service.get_release_record(contract_id, version))
 
 
 @app.delete("/contracts/{contract_id}")
@@ -112,13 +171,59 @@ def revoke_contract(contract_id: str) -> dict[str, Any]:
 
 @app.post("/contracts/{contract_id}/validate")
 def validate(contract_id: str, body: ValidateIn) -> dict[str, Any]:
-    result = service.validate(contract_id, body.version, body.payload)
+    result = service.validate(
+        contract_id, body.version, body.payload, timeout_seconds=body.timeout_seconds
+    )
     return {
         "ok": result.ok,
         "contract_id": result.contract_id,
         "version": result.version,
         "issues": [
             {"path": i.path, "code": i.code, "message": i.message} for i in result.issues
+        ],
+    }
+
+
+@app.post("/contracts/{contract_id}/validate-pair")
+def validate_pair(contract_id: str, body: ValidatePairIn) -> dict[str, Any]:
+    result = service.validate_pair(
+        contract_id,
+        body.version,
+        body.request_payload,
+        body.response_payload,
+        timeout_seconds=body.timeout_seconds,
+    )
+
+    def side_out(side_result: Any) -> dict[str, Any]:
+        return {
+            "side": side_result.side.value,
+            "ok": side_result.ok,
+            "issues": [
+                {"path": i.path, "code": i.code, "message": i.message}
+                for i in side_result.issues
+            ],
+        }
+
+    return {
+        "ok": result.ok,
+        "contract_id": result.contract_id,
+        "version": result.version,
+        "request": side_out(result.request),
+        "response": side_out(result.response),
+    }
+
+
+def _decision_out(d: Any) -> dict[str, Any]:
+    return {
+        "contract_id": d.contract_id,
+        "from_version": d.from_version,
+        "to_version": d.to_version,
+        "verdict": d.verdict.value,
+        "allowed": d.allowed,
+        "accepted_breaking": d.accepted_breaking,
+        "changes": [
+            {"kind": c.kind.value, "field": c.field_name, "detail": c.detail}
+            for c in d.changes
         ],
     }
 
