@@ -93,22 +93,34 @@ class Contract:
 
 @dataclass(frozen=True)
 class Change:
-    """一次版本间变更的归一化描述。"""
+    """一次版本间变更的归一化描述。
+
+    side 标记变化发生在哪一侧（请求/响应），单侧契约的变更归为请求侧；
+    缺省 None 仅为兼容旧的构造方式。
+    """
 
     kind: ChangeKind
     field_name: str
     detail: str
+    side: "Side | None" = None
 
 
 @dataclass(frozen=True)
 class CompatReport:
-    """兼容性判定报告：结论 + 判定依据，可复现。"""
+    """兼容性判定报告：结论 + 判定依据，可复现。
+
+    成对契约请求侧与响应侧分别判定：request_verdict / response_verdict
+    各自给出单侧结论，整体 verdict 为两侧中最严格者（任一侧破坏性则整体
+    破坏性）。response_verdict 为 None 表示该契约未声明响应侧形状。
+    """
 
     contract_id: str
     from_version: int
     to_version: int
     verdict: Verdict
     changes: tuple[Change, ...] = ()
+    request_verdict: Verdict = Verdict.COMPATIBLE
+    response_verdict: Verdict | None = None
 
 
 @dataclass(frozen=True)
@@ -156,7 +168,11 @@ class PairValidationResult:
 
 @dataclass(frozen=True)
 class ReleaseDecision:
-    """一次版本发布门禁的判定依据与确认结果，落库后可重新查到。"""
+    """一次版本发布门禁的判定依据与确认结果，落库后可重新查到。
+
+    成对契约的分侧结论（request_verdict / response_verdict）随判定一起
+    留档：任一侧为破坏性时整体 verdict 即为破坏性，需显式接受才放行。
+    """
 
     contract_id: str
     from_version: int
@@ -165,3 +181,5 @@ class ReleaseDecision:
     changes: tuple[Change, ...]
     accepted_breaking: bool
     allowed: bool
+    request_verdict: Verdict = Verdict.COMPATIBLE
+    response_verdict: Verdict | None = None

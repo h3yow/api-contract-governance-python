@@ -132,3 +132,56 @@ def test_non_adjacent_versions_rejected(svc):
     with pytest.raises(GovernanceError) as exc:
         svc.check_compatibility("user-api", 1, 3)
     assert exc.value.reason is Reason.ILLEGAL_VERSION_TRANSITION
+
+
+def test_paired_contract_response_side_changes_visible(svc, log):
+    """成对契约：兼容性查询分别给出两侧结论，响应侧变化带侧别标记。"""
+    from contract_governance import Side
+
+    spec_v1 = ContractSpec(
+        fields=(FieldSpec("id", FieldType.INTEGER, required=True),),
+        response_fields=(
+            FieldSpec("ticket", FieldType.STRING, required=True),
+            FieldSpec("note", FieldType.STRING),
+        ),
+    )
+    # 请求侧不变，仅响应侧删必填字段 + 新增可选字段。
+    spec_v2 = ContractSpec(
+        fields=spec_v1.fields,
+        response_fields=(FieldSpec("trace", FieldType.STRING),),
+    )
+    svc.register("pair-api", spec_v1)
+    svc.update("pair-api", 2, spec_v2)
+    report = svc.check_compatibility("pair-api", 1, 2)
+    log.info(
+        "contract=pair-api verdict=%s req=%s resp=%s basis=%s",
+        report.verdict.value,
+        report.request_verdict.value,
+        report.response_verdict.value,
+        [(c.side.value if c.side else None, c.kind.value, c.field_name) for c in report.changes],
+    )
+    assert report.verdict is Verdict.BREAKING
+    assert report.request_verdict is Verdict.COMPATIBLE
+    assert report.response_verdict is Verdict.BREAKING
+    by_side = {(c.side, c.kind, c.field_name) for c in report.changes}
+    assert (Side.RESPONSE, ChangeKind.FIELD_REMOVED, "ticket") in by_side
+    assert (Side.RESPONSE, ChangeKind.FIELD_REMOVED, "note") in by_side
+    assert (Side.RESPONSE, ChangeKind.FIELD_ADDED_OPTIONAL, "trace") in by_side
+
+
+def test_single_side_contract_has_no_response_verdict(svc):
+    """单侧契约：响应侧不参与判定，response_verdict 为 None。"""
+    svc.register("user-api", V1)
+    svc.update(
+        "user-api",
+        2,
+        ContractSpec(fields=V1.fields + (FieldSpec("nick", FieldType.STRING),)),
+    )
+    report = svc.check_compatibility("user-api", 1, 2)
+    assert report.response_verdict is None
+    assert report.request_verdict is Verdict.COMPATIBLE
+    # 单侧契约的变更归为请求侧。
+    from contract_governance import Side
+
+    assert all(c.side is Side.REQUEST for c in report.changes)
+    assert len(report.changes) == 1

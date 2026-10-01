@@ -213,18 +213,24 @@ def validate_pair(contract_id: str, body: ValidatePairIn) -> dict[str, Any]:
     }
 
 
+def _changes_out(changes: Any) -> list[dict[str, Any]]:
+    return [
+        {"kind": c.kind.value, "field": c.field_name, "detail": c.detail, "side": c.side.value if c.side else None}
+        for c in changes
+    ]
+
+
 def _decision_out(d: Any) -> dict[str, Any]:
     return {
         "contract_id": d.contract_id,
         "from_version": d.from_version,
         "to_version": d.to_version,
         "verdict": d.verdict.value,
+        "request_verdict": d.request_verdict.value,
+        "response_verdict": d.response_verdict.value if d.response_verdict else None,
         "allowed": d.allowed,
         "accepted_breaking": d.accepted_breaking,
-        "changes": [
-            {"kind": c.kind.value, "field": c.field_name, "detail": c.detail}
-            for c in d.changes
-        ],
+        "changes": _changes_out(d.changes),
     }
 
 
@@ -236,8 +242,7 @@ def compatibility(contract_id: str, from_version: int, to_version: int) -> dict[
         "from_version": report.from_version,
         "to_version": report.to_version,
         "verdict": report.verdict.value,
-        "changes": [
-            {"kind": c.kind.value, "field": c.field_name, "detail": c.detail}
-            for c in report.changes
-        ],
+        "request_verdict": report.request_verdict.value,
+        "response_verdict": report.response_verdict.value if report.response_verdict else None,
+        "changes": _changes_out(report.changes),
     }

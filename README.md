@@ -66,7 +66,14 @@ result.side(Side.REQUEST) # 按侧别取单侧结论
 | 新增可选字段                     | `field_added_optional`| 兼容   |
 
 任一破坏性变更即判定 `breaking`，否则 `compatible`。判定为纯函数，
-变更列表按字段名排序，同一对版本的结论必然一致。
+变更列表按侧别再按字段名排序，同一对版本的结论必然一致。
+
+**成对契约分侧判定**：声明了 `response_fields` 的契约，请求侧与响应侧
+分别套用同一套规则独立判定。报告中每条变更带 `side` 标记
+（`request` / `response`），并给出分侧结论 `request_verdict` /
+`response_verdict`；整体 `verdict` 取两侧最严格者——任一侧出现破坏性
+改动即整体 `breaking`，两侧问题互不掩盖。单侧契约不参与响应侧判定，
+其 `response_verdict` 为 `None`。
 
 ## 发布门禁（`publish`）
 
@@ -75,13 +82,17 @@ result.side(Side.REQUEST) # 按侧别取单侧结论
 
 - 先取「当前版本 → 目标版本」的相邻版本判定；目标版本必须恰为当前版本 + 1，
   跳号、回退、重复一律报 `illegal_version_transition`，与门禁拒绝原因区分。
+- **成对契约的门禁对请求侧和响应侧都生效**：两侧分别判定，任一侧为
+  `breaking`（例如删掉必填响应字段、响应字段类型收窄、可选响应字段改必填）
+  整体即 `breaking`；判定依据中的 `side`、`request_verdict`、
+  `response_verdict` 能看出变化发生在哪一侧。
 - 判定为 `breaking` 时**默认拒绝落库**，报 `breaking_change_rejected`，
   不留版本、不留档案。
 - 调用方显式传 `accept_breaking=True` 才允许破坏性版本落库。
   兼容变更不受该标记影响（不会被记成“接受过破坏性变更”）。
-- 落库成功后，这对版本的判定结论、变更依据与确认结果可通过
-  `get_release_record(contract_id, version)` 重新查到；查不到报
-  `release_record_not_found`。
+- 落库成功后，这对版本的判定结论（含分侧结论）、变更依据与确认结果可通过
+  `get_release_record(contract_id, version)` 重新查到，且与实际是否接受
+  保持一致；查不到报 `release_record_not_found`。
 - 同一目标版本并发提交（无论是否带确认）都只有一个成功，其余收到
   `illegal_version_transition`，不会覆盖丢失。
 
@@ -175,4 +186,20 @@ curl -s -XPOST localhost:8000/contracts/pub/releases -H 'content-type: applicati
 curl -s -XPOST localhost:8000/contracts/pub/releases -H 'content-type: application/json' \
   -d '{"version":2,"fields":[],"accept_breaking":true}'  # 201 落库并留档
 curl -s localhost:8000/contracts/pub/releases/2         # 复查判定依据与确认结果
+
+# 成对契约：仅响应侧破坏性（删掉必填响应字段）同样被门禁拦截
+curl -s -XPOST localhost:8000/contracts -H 'content-type: application/json' -d '{
+  "contract_id": "pair-pub",
+  "fields": [{"name":"id","type":"integer","required":true}],
+  "response_fields": [{"name":"ticket","type":"string","required":true}]}'
+curl -s -XPOST localhost:8000/contracts/pair-pub/releases -H 'content-type: application/json' \
+  -d '{"version":2,"fields":[{"name":"id","type":"integer","required":true}],"response_fields":[]}'
+#  -> 409 breaking_change_rejected（响应侧 field_removed）
+curl -s -XPOST localhost:8000/contracts/pair-pub/releases -H 'content-type: application/json' \
+  -d '{"version":2,"fields":[{"name":"id","type":"integer","required":true}],"response_fields":[],"accept_breaking":true}'
+#  -> 201；响应里 request_verdict=compatible、response_verdict=breaking，
+#    changes 中该条 side=response
+curl -s localhost:8000/contracts/pair-pub/releases/2   # 按版本复查分侧结论与接受结果
+curl -s 'localhost:8000/contracts/pair-pub/compatibility?from_version=1&to_version=2'
+#  -> 兼容性查询同样能看到响应侧的变化及其侧别
 ```
