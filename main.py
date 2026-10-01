@@ -219,10 +219,12 @@ def _decision_out(d: Any) -> dict[str, Any]:
         "from_version": d.from_version,
         "to_version": d.to_version,
         "verdict": d.verdict.value,
+        "request_verdict": d.request_verdict.value,
+        "response_verdict": d.response_verdict.value if d.response_verdict is not None else None,
         "allowed": d.allowed,
         "accepted_breaking": d.accepted_breaking,
         "changes": [
-            {"kind": c.kind.value, "field": c.field_name, "detail": c.detail}
+            {"kind": c.kind.value, "side": c.side.value, "field": c.field_name, "detail": c.detail}
             for c in d.changes
         ],
     }
@@ -231,13 +233,33 @@ def _decision_out(d: Any) -> dict[str, Any]:
 @app.get("/contracts/{contract_id}/compatibility")
 def compatibility(contract_id: str, from_version: int, to_version: int) -> dict[str, Any]:
     report = service.check_compatibility(contract_id, from_version, to_version)
+
+    def side_out(side_report: Any) -> dict[str, Any] | None:
+        if side_report is None:
+            return None
+        return {
+            "side": side_report.side.value,
+            "verdict": side_report.verdict.value,
+            "changes": [
+                {
+                    "kind": c.kind.value,
+                    "side": c.side.value,
+                    "field": c.field_name,
+                    "detail": c.detail,
+                }
+                for c in side_report.changes
+            ],
+        }
+
     return {
         "contract_id": report.contract_id,
         "from_version": report.from_version,
         "to_version": report.to_version,
         "verdict": report.verdict.value,
+        "request": side_out(report.request),
+        "response": side_out(report.response),
         "changes": [
-            {"kind": c.kind.value, "field": c.field_name, "detail": c.detail}
+            {"kind": c.kind.value, "side": c.side.value, "field": c.field_name, "detail": c.detail}
             for c in report.changes
         ],
     }

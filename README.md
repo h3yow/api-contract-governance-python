@@ -65,31 +65,60 @@ result.side(Side.REQUEST) # 按侧别取单侧结论
 | 必填放宽（必填→可选）            | `required_relaxed`    | 兼容   |
 | 新增可选字段                     | `field_added_optional`| 兼容   |
 
-任一破坏性变更即判定 `breaking`，否则 `compatible`。判定为纯函数，
-变更列表按字段名排序，同一对版本的结论必然一致。
+任一侧出现任一破坏性变更即判定整体 `breaking`，否则 `compatible`。
+判定为纯函数，每侧变更列表按字段名排序、合并依据按 `(字段名, 侧别)` 排序，
+同一对版本的结论必然一致。
+
+### 请求侧与响应侧分别判定
+
+成对契约的**请求侧与响应侧分别独立判定**，结论与依据互不掩盖：
+
+- `CompatReport.request` / `CompatReport.response` 各是一份带 `side` 的
+  单侧报告（`verdict` + 该侧 `changes`）；老的单侧契约 `response` 为 `None`。
+- 每条 `Change` 都带 `side`（`request` / `response`），可逐条看出变化发生在哪一侧；
+  顶层 `changes` 是两侧合并后的完整依据。
+- 任一侧为 `breaking`，整体 `verdict` 即为 `breaking`；
+  请求侧的问题不会被响应侧的兼容结论掩盖，反之亦然。
+- 单侧契约升级为成对契约（或反向）时，未声明的一侧按空形状参与判定：
+  例如新增**必填**响应字段会在响应侧判定为 `required_expanded`（破坏性）。
+
+```python
+report = svc.check_compatibility("pair-api", 1, 2)
+report.verdict                 # 任一侧破坏即 breaking
+report.request.verdict         # 请求侧独立结论
+report.response.verdict        # 响应侧独立结论
+report.response.changes        # 只归属响应侧的变化（每条带 side）
+```
 
 ## 发布门禁（`publish`）
 
 直接 `update` 只校验线性版本流转；`publish` 在落库前额外强制一道
-破坏性变更门禁：
+破坏性变更门禁，**对成对契约的请求侧与响应侧同时生效**：
 
-- 先取「当前版本 → 目标版本」的相邻版本判定；目标版本必须恰为当前版本 + 1，
+- 先取「当前版本 → 目标版本」的相邻版本分侧判定；目标版本必须恰为当前版本 + 1，
   跳号、回退、重复一律报 `illegal_version_transition`，与门禁拒绝原因区分。
-- 判定为 `breaking` 时**默认拒绝落库**，报 `breaking_change_rejected`，
-  不留版本、不留档案。
+- **请求侧、响应侧分别过门禁**：`ReleaseDecision.request_verdict` 与
+  `response_verdict` 分别保留两侧结论（老单侧契约 `response_verdict` 为 `None`），
+  `changes` 中每条变更带 `side` 标记。**任何一侧出现破坏性改动都拦住发布**，
+  两侧问题互不掩盖；拒绝消息会点名实际发生破坏性改动的侧（如 `side(s): response`）。
+- 判定为 `breaking`（无论破坏性来自请求侧、响应侧或两侧）时**默认拒绝落库**，
+  报 `breaking_change_rejected`，不留版本、不留档案；该原因与
+  跳号/回退/重复的 `illegal_version_transition` 明确区分。
 - 调用方显式传 `accept_breaking=True` 才允许破坏性版本落库。
   兼容变更不受该标记影响（不会被记成“接受过破坏性变更”）。
-- 落库成功后，这对版本的判定结论、变更依据与确认结果可通过
+- 落库成功后，这对版本的两侧判定结论、变更依据与确认结果可通过
   `get_release_record(contract_id, version)` 重新查到；查不到报
   `release_record_not_found`。
-- 同一目标版本并发提交（无论是否带确认）都只有一个成功，其余收到
-  `illegal_version_transition`，不会覆盖丢失。
+- 同一目标版本并发提交（无论是否带确认、破坏性来自哪一侧）都只有一个成功，
+  其余收到 `illegal_version_transition`，不会覆盖丢失。
 
 ```python
-svc.publish("user-api", 2, spec_v2)                          # 破坏性 -> 拒绝
+svc.publish("user-api", 2, spec_v2)                          # 任一侧破坏性 -> 拒绝
 svc.publish("user-api", 2, spec_v2, accept_breaking=True)    # 显式接受 -> 落库
 record = svc.get_release_record("user-api", 2)              # 复查判定依据与确认结果
-record.verdict, record.changes, record.accepted_breaking
+record.verdict, record.request_verdict, record.response_verdict
+record.changes            # 每条变更带 side，可看出变化发生在哪一侧
+record.accepted_breaking
 ```
 
 显式接受的作用范围仅限**本次发布的这一对相邻版本**；它不是全局豁免，
@@ -131,8 +160,8 @@ record.verdict, record.changes, record.accepted_breaking
 | POST   | `/contracts`                             | 注册契约（可带 `response_fields` 声明成对形状） |
 | GET    | `/contracts/{id}`                        | 查询当前版本       |
 | PUT    | `/contracts/{id}`                        | 更新到下一版本（不经门禁，保留原语义） |
-| POST   | `/contracts/{id}/releases`               | 门禁发布：破坏性变更需 `accept_breaking` |
-| GET    | `/contracts/{id}/releases/{version}`     | 查询发布门禁判定依据与确认结果 |
+| POST   | `/contracts/{id}/releases`               | 门禁发布：请求侧/响应侧任一破坏性变更需 `accept_breaking` |
+| GET    | `/contracts/{id}/releases/{version}`     | 查询发布门禁两侧判定依据与确认结果 |
 | DELETE | `/contracts/{id}`                        | 撤销契约           |
 | POST   | `/contracts/{id}/validate`               | 运行时单侧校验（可带 `timeout_seconds`） |
 | POST   | `/contracts/{id}/validate-pair`          | 成对校验请求/响应两侧（可带 `timeout_seconds`） |
@@ -175,4 +204,24 @@ curl -s -XPOST localhost:8000/contracts/pub/releases -H 'content-type: applicati
 curl -s -XPOST localhost:8000/contracts/pub/releases -H 'content-type: application/json' \
   -d '{"version":2,"fields":[],"accept_breaking":true}'  # 201 落库并留档
 curl -s localhost:8000/contracts/pub/releases/2         # 复查判定依据与确认结果
+
+# 成对契约：请求侧不变，只在响应侧删掉必填字段 -> 默认拒绝 / 显式接受后放行
+curl -s -XPOST localhost:8000/contracts -H 'content-type: application/json' -d '{
+  "contract_id": "pair-pub",
+  "fields": [{"name":"id","type":"integer","required":true}],
+  "response_fields": [{"name":"code","type":"integer","required":true},
+                      {"name":"ok","type":"boolean","required":true}]}'
+curl -s -XPOST localhost:8000/contracts/pair-pub/releases -H 'content-type: application/json' \
+  -d '{"version":2,
+       "fields":[{"name":"id","type":"integer","required":true}],
+       "response_fields":[{"name":"code","type":"integer","required":true}]}'
+# -> 409 breaking_change_rejected，消息点名 side(s): response
+curl -s -XPOST localhost:8000/contracts/pair-pub/releases -H 'content-type: application/json' \
+  -d '{"version":2,
+       "fields":[{"name":"id","type":"integer","required":true}],
+       "response_fields":[{"name":"code","type":"integer","required":true}],
+       "accept_breaking":true}'
+# -> 201 落库，响应含 request_verdict=compatible / response_verdict=breaking
+curl -s 'localhost:8000/contracts/pair-pub/compatibility?from_version=1&to_version=2'
+# -> request/response 分侧结论，changes 中每条带 side
 ```

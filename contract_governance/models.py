@@ -93,21 +93,43 @@ class Contract:
 
 @dataclass(frozen=True)
 class Change:
-    """一次版本间变更的归一化描述。"""
+    """一次版本间变更的归一化描述。
+
+    side 标明变更发生在哪一侧（请求侧 / 响应侧），
+    使两侧的判定依据互不掩盖、可逐条归属。
+    """
 
     kind: ChangeKind
     field_name: str
     detail: str
+    side: Side = Side.REQUEST
+
+
+@dataclass(frozen=True)
+class SideCompatReport:
+    """单侧（请求侧或响应侧）的兼容性判定结论与依据。"""
+
+    side: Side
+    verdict: Verdict
+    changes: tuple[Change, ...] = ()
 
 
 @dataclass(frozen=True)
 class CompatReport:
-    """兼容性判定报告：结论 + 判定依据，可复现。"""
+    """兼容性判定报告：结论 + 判定依据，可复现。
+
+    - request：请求侧判定；老的单侧契约也始终有请求侧结论。
+    - response：响应侧判定；老的单侧契约为 None（该侧未声明形状）。
+    - 成对契约两侧分别判定，任一侧 breaking 则整体 verdict 为 breaking，
+      changes 为两侧带 side 标记的合并依据。
+    """
 
     contract_id: str
     from_version: int
     to_version: int
     verdict: Verdict
+    request: SideCompatReport
+    response: SideCompatReport | None = None
     changes: tuple[Change, ...] = ()
 
 
@@ -156,7 +178,12 @@ class PairValidationResult:
 
 @dataclass(frozen=True)
 class ReleaseDecision:
-    """一次版本发布门禁的判定依据与确认结果，落库后可重新查到。"""
+    """一次版本发布门禁的判定依据与确认结果，落库后可重新查到。
+
+    request_verdict / response_verdict 分别记录两侧结论：
+    成对契约两侧分别过门禁，任一侧为 breaking 即整体 verdict 为 breaking；
+    老的单侧契约 response_verdict 为 None（未声明响应侧）。
+    """
 
     contract_id: str
     from_version: int
@@ -165,3 +192,5 @@ class ReleaseDecision:
     changes: tuple[Change, ...]
     accepted_breaking: bool
     allowed: bool
+    request_verdict: Verdict = Verdict.COMPATIBLE
+    response_verdict: Verdict | None = None

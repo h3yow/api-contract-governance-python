@@ -14,7 +14,9 @@ from .models import (
     ContractSpec,
     PairValidationResult,
     ReleaseDecision,
+    Side,
     ValidationResult,
+    Verdict,
 )
 from .publishing import apply_release, evaluate_release
 from .registry import ContractRegistry
@@ -106,11 +108,13 @@ class GovernanceService:
         """提交新版本：先过相邻版本门禁，破坏性变更需显式接受后落库。"""
         decision = evaluate_release(self._registry, contract_id, version, spec)
         if not decision.allowed and not accept_breaking:
-            # 破坏性变更默认拒绝，原因与非法版本流转区分。
+            # 破坏性变更默认拒绝，原因与非法版本流转区分；
+            # 消息中点名实际发生破坏性改动的侧，依据可定位到侧。
             raise GovernanceError(
                 Reason.BREAKING_CHANGE_REJECTED,
                 f"release {contract_id} {decision.from_version} -> {version} "
-                f"contains breaking changes; explicit acceptance required",
+                f"contains breaking changes on side(s): {self._breaking_side_names(decision)}; "
+                f"explicit acceptance required",
             )
         final = apply_release(
             self._registry,
@@ -134,3 +138,12 @@ class GovernanceService:
                 f"no gated release record for '{contract_id}' version {version}",
             )
         return record
+
+    @staticmethod
+    def _breaking_side_names(decision: ReleaseDecision) -> str:
+        """返回实际判定为破坏性的侧别名（逗号分隔），用于拒绝原因定位。"""
+        candidates = (
+            (decision.request_verdict, Side.REQUEST.value),
+            (decision.response_verdict, Side.RESPONSE.value),
+        )
+        return ",".join(name for verdict, name in candidates if verdict is Verdict.BREAKING)

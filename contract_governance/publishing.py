@@ -47,6 +47,8 @@ def evaluate_release(
         changes=report.changes,
         accepted_breaking=False,
         allowed=not breaking,
+        request_verdict=report.request.verdict,
+        response_verdict=report.response.verdict if report.response is not None else None,
     )
 
 
@@ -83,6 +85,8 @@ def apply_release(
         changes=decision.changes,
         accepted_breaking=accept_breaking and decision.verdict is Verdict.BREAKING,
         allowed=True,
+        request_verdict=decision.request_verdict,
+        response_verdict=decision.response_verdict,
     )
     # 原子落库：并发同一目标版本时只有一个能成功。
     registry.update(contract_id, target_version, spec)

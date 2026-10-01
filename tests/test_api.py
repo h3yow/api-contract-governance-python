@@ -174,3 +174,91 @@ def test_publish_gate_endpoints():
     missing = client.get("/contracts/pub/releases/9")
     assert missing.status_code == 404
     assert missing.json()["error"]["reason"] == "release_record_not_found"
+
+
+def test_paired_response_breaking_publish_gate():
+    # 成对契约：请求侧不变，响应侧删掉必填字段 ok -> 只在响应侧破坏性。
+    r = client.post(
+        "/contracts",
+        json={
+            "contract_id": "pair-pub",
+            "fields": [{"name": "id", "type": "integer", "required": True}],
+            "response_fields": [
+                {"name": "code", "type": "integer", "required": True},
+                {"name": "ok", "type": "boolean", "required": True},
+            ],
+        },
+    )
+    assert r.status_code == 201
+
+    v2 = {
+        "version": 2,
+        "fields": [{"name": "id", "type": "integer", "required": True}],
+        "response_fields": [{"name": "code", "type": "integer", "required": True}],
+    }
+
+    # 默认拒绝：两侧结论都在门禁响应路径上由原因区分（破坏性原因码）。
+    rejected = client.post("/contracts/pair-pub/releases", json=v2)
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["reason"] == "breaking_change_rejected"
+    assert "response" in rejected.json()["error"]["message"]
+
+    # 显式接受后落库，两侧结论随留档返回。
+    v2["accept_breaking"] = True
+    accepted = client.post("/contracts/pair-pub/releases", json=v2)
+    assert accepted.status_code == 201
+    body = accepted.json()
+    assert body["verdict"] == "breaking"
+    assert body["request_verdict"] == "compatible"
+    assert body["response_verdict"] == "breaking"
+    assert body["accepted_breaking"] is True
+    resp_changes = [c for c in body["changes"] if c["side"] == "response"]
+    assert resp_changes and resp_changes[0]["kind"] == "field_removed"
+    assert resp_changes[0]["field"] == "ok"
+
+    rec = client.get("/contracts/pair-pub/releases/2")
+    assert rec.status_code == 200
+    rec_body = rec.json()
+    assert rec_body["response_verdict"] == "breaking"
+    assert rec_body["accepted_breaking"] is True
+
+
+def test_paired_compatibility_endpoint_shows_response_side():
+    client.post(
+        "/contracts",
+        json={
+            "contract_id": "pair-compat",
+            "fields": [{"name": "id", "type": "integer", "required": True}],
+            "response_fields": [
+                {"name": "code", "type": "integer", "required": True},
+                {"name": "ok", "type": "boolean"},
+            ],
+        },
+    )
+    # 响应侧 code 类型收窄 integer -> string；请求侧不变。
+    client.put(
+        "/contracts/pair-compat",
+        json={
+            "version": 2,
+            "fields": [{"name": "id", "type": "integer", "required": True}],
+            "response_fields": [
+                {"name": "code", "type": "string", "required": True},
+                {"name": "ok", "type": "boolean"},
+            ],
+        },
+    )
+    r = client.get(
+        "/contracts/pair-compat/compatibility",
+        params={"from_version": 1, "to_version": 2},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verdict"] == "breaking"
+    assert body["request"]["verdict"] == "compatible"
+    assert body["response"]["verdict"] == "breaking"
+    narrowed = [
+        c
+        for c in body["changes"]
+        if c["kind"] == "type_narrowed" and c["side"] == "response"
+    ]
+    assert len(narrowed) == 1 and narrowed[0]["field"] == "code"
